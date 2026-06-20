@@ -1,0 +1,80 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+*.swp
+*.swo
+
+# Python / MicroPython helper artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.venv/
+venv/
+
+# Logs
+*.log
+*.rpt
+*.jou
+*.str
+*.tmp
+*.bak
+*.orig
+
+# Generic build outputs
+build/
+out/
+dist/
+output/
+outputs/
+tmp/
+temp/
+
+# FPGA generated artifacts
+*.bin
+*.bit
+*.hex
+*.jed
+*.svf
+*.fs
+*.asc
+*.json
+*.edif
+*.edf
+*.net
+*.vcd
+*.fst
+
+# Synthesis / implementation working directories
+synth/
+impl/
+impl_*/
+synthesis/
+simulation/
+sim/
+work/
+db/
+incremental_db/
+.cache/
+
+# Renesas Forge / FPGA tool intermediate files
+*.map
+*.place
+*.route
+*.tim
+*.pnr
+*.pack
+*.unpack
+
+# Keep source/project files
+# Do NOT ignore:
+#   *.v
+#   *.sv
+#   *.py
+#   *.md
+#   *.ffpga
+#   constraints / pin assignment files
