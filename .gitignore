@@ -70,6 +70,10 @@ incremental_db/
 *.pack
 *.unpack
 
+# But keep FPGA bitstream binaries
+!**/bitstream/
+!**/bitstream/*.bin
+
 # Keep source/project files
 # Do NOT ignore:
 #   *.v
