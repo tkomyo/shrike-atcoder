@@ -74,6 +74,9 @@ incremental_db/
 !**/bitstream/
 !**/bitstream/*.bin
 
+# Local experiments
+/debugtest/
+
 # Keep source/project files
 # Do NOT ignore:
 #   *.v
