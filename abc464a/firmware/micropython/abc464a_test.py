@@ -1,37 +1,32 @@
 from machine import Pin, SPI
 import time
 
-# ============================================================
+
 # Shrike / RP2040 SPI pin assignment
-# ============================================================
 PIN_MISO = 0
-PIN_CS   = 1
-PIN_SCK  = 2
+PIN_CS = 1
+PIN_SCK = 2
 PIN_MOSI = 3
 PIN_RST_N = 14
 
 SPI_ID = 0
 SPI_BAUDRATE = 1_000_000
 BYTE_GAP_US = 20
-
 USE_HW_RESET = True
 
-# ============================================================
-# Protocol
-#
-# MOSI: [7:5] CMD, [4:0] DATA
-# MISO: [7] STATE/VALID, [6:1] AUX, [0] DATA/result
-# ============================================================
-CMD_NOP   = 0b000
-CMD_SET_X = 0b001
-CMD_SET_S = 0b010
+
+# MOSI: [7:5] CMD, [4:1] reserved, [0] DATA
+CMD_NOP = 0b000
+CMD_DATA = 0b001
+CMD_EOD = 0b010
 CMD_DEBUG = 0b101
 CMD_RESET = 0b111
 
+REPLY_WAIT = 0x00
+REPLY_WEST = 0x80
+REPLY_EAST = 0x81
 
-# ============================================================
-# SPI setup
-# ============================================================
+
 spi = SPI(
     SPI_ID,
     baudrate=SPI_BAUDRATE,
@@ -52,9 +47,6 @@ else:
     rst_n = None
 
 
-# ============================================================
-# Utility functions
-# ============================================================
 def hw_reset():
     if rst_n is None:
         return
@@ -65,40 +57,21 @@ def hw_reset():
     time.sleep_ms(5)
 
 
-def make_cmd(cmd, data=0):
-    return ((cmd & 0b111) << 5) | (data & 0b11111)
-
-
-def bin_bits(x, width):
-    s = ""
-    for i in range(width - 1, -1, -1):
-        if (x >> i) & 1:
-            s += "1"
-        else:
-            s += "0"
-    return s
+def make_frame(cmd, bit=0):
+    return ((cmd & 0b111) << 5) | (bit & 0b1)
 
 
 def bin8(x):
-    return bin_bits(x & 0xFF, 8)
-
-
-def bin5(x):
-    return bin_bits(x & 0x1F, 5)
-
-
-def hex_digit(v):
-    v = v & 0xF
-    if v < 10:
-        return chr(ord("0") + v)
-    return chr(ord("A") + v - 10)
+    s = ""
+    for i in range(7, -1, -1):
+        s += "1" if ((x >> i) & 1) else "0"
+    return s
 
 
 def hex8(x):
-    x = x & 0xFF
-    hi = (x >> 4) & 0xF
-    lo = x & 0xF
-    return "0x" + hex_digit(hi) + hex_digit(lo)
+    digits = "0123456789ABCDEF"
+    x &= 0xFF
+    return "0x" + digits[(x >> 4) & 0xF] + digits[x & 0xF]
 
 
 def pad_right(s, width):
@@ -107,298 +80,222 @@ def pad_right(s, width):
     return s
 
 
-# ============================================================
-# SPI low-level
-# ============================================================
-def spi_transfer_byte(tx):
+def spi_xfer(byte):
     rx = bytearray(1)
-    txb = bytes([tx & 0xFF])
+    tx = bytes([byte & 0xFF])
 
     cs.value(0)
-    spi.write_readinto(txb, rx)
+    spi.write_readinto(tx, rx)
     cs.value(1)
 
     time.sleep_us(BYTE_GAP_US)
     return rx[0]
 
 
-def decode_miso(rx):
-    valid = (rx >> 7) & 1
-    aux   = (rx >> 1) & 0b111111
-    data  = rx & 1
-    return valid, aux, data
-
-
-def transfer(label, tx, log=True):
-    rx = spi_transfer_byte(tx)
-
+def xfer(label, byte, log=True):
+    rx = spi_xfer(byte)
     if log:
-        valid, aux, data = decode_miso(rx)
-
-        if valid:
-            state = "REPLY"
-        else:
-            state = "WAIT "
-
         print(
             pad_right(label, 18)
-            + " TX=" + hex8(tx) + " " + bin8(tx)
+            + " TX=" + hex8(byte) + " " + bin8(byte)
             + "  RX=" + hex8(rx) + " " + bin8(rx)
-            + "  " + state
-            + " aux=" + str(aux)
-            + " data=" + str(data)
         )
-
     return rx
 
 
-# ============================================================
-# ABC463B input conversion
-#
-# A = bit0
-# B = bit1
-# C = bit2
-# D = bit3
-# E = bit4
-# ============================================================
-def x_to_mask(x):
-    idx = ord(x) - ord("A")
-
-    if idx < 0 or idx >= 5:
-        raise ValueError("X must be one of A, B, C, D, E")
-
-    return 1 << idx
+def send_reset(log=True):
+    return xfer("RESET", make_frame(CMD_RESET), log)
 
 
-def s_to_mask(s):
-    if len(s) != 5:
-        raise ValueError("S must have length 5")
-
-    mask = 0
-
-    for i in range(5):
-        ch = s[i]
-
-        if ch == "o":
-            mask |= 1 << i
-        elif ch == "x":
-            pass
-        else:
-            raise ValueError("S must consist of only 'o' and 'x'")
-
-    return mask
+def send_nop(log=True):
+    return xfer("NOP", make_frame(CMD_NOP), log)
 
 
-def parse_input_text(text):
-    raw_lines = text.splitlines()
-    lines = []
-
-    for line in raw_lines:
-        line = line.strip()
-        if line != "":
-            lines.append(line)
-
-    first = lines[0].split()
-    n = int(first[0])
-    x = first[1]
-
-    ss = []
-    for i in range(n):
-        ss.append(lines[i + 1])
-
-    return n, x, ss
-
-
-# ============================================================
-# Expected answer by RP software
-# ============================================================
-def expected_answer(input_text):
-    n, x, ss = parse_input_text(input_text)
-    idx = ord(x) - ord("A")
-
-    for s in ss:
-        if s[idx] == "o":
-            return "Yes"
-
-    return "No"
-
-
-# ============================================================
-# FPGA solve sequence
-# ============================================================
-def solve_with_fpga(input_text, log=True):
-    n, x, ss = parse_input_text(input_text)
-
-    x_mask = x_to_mask(x)
-
-    if log:
-        print("N =", n, "X =", x, "X_mask =", bin5(x_mask))
-        print("---- SPI sequence ----")
-
-    # Start sequence
-    transfer("initial NOP", make_cmd(CMD_NOP), log)
-    transfer("RESET", make_cmd(CMD_RESET), log)
-    transfer("post RESET NOP", make_cmd(CMD_NOP), log)
-
-    # Send X
-    transfer("SET_X " + x, make_cmd(CMD_SET_X, x_mask), log)
-
-    # Send S lines
-    #
-    # FPGA側は SET_S 受信時に次回MISO用 reply を準備する。
-    # そのため、2個目以降の SET_S の RX に暫定REPLYが出ることがある。
-    # 正式結果として採用するのは final NOP の RX だけ。
-    for i in range(n):
-        s = ss[i]
-        s_mask = s_to_mask(s)
-
-        if log:
-            print("  S_mask", i + 1, "=", bin5(s_mask))
-
-        transfer("SET_S " + str(i + 1) + " " + s, make_cmd(CMD_SET_S, s_mask), log)
-
-    # Read final reply
-    rx = transfer("final NOP", make_cmd(CMD_NOP), log)
-    valid, aux, result = decode_miso(rx)
-
-    if valid != 1:
-        print("WARN: final NOP did not return valid REPLY")
-
-    if result == 1:
-        answer = "Yes"
+def send_data(ch, log=True):
+    if ch == "E":
+        bit = 1
+    elif ch == "W":
+        bit = 0
     else:
-        answer = "No"
+        raise ValueError("S must consist of only E and W")
 
-    if log:
-        print("---- result ----")
-        print("valid =", valid, "aux =", aux, "result =", result)
-        print("answer =", answer)
-
-    # End cleanup
-    transfer("end RESET", make_cmd(CMD_RESET), log)
-    transfer("end NOP", make_cmd(CMD_NOP), log)
-
-    return answer
+    return xfer("DATA " + ch, make_frame(CMD_DATA, bit), log)
 
 
-# ============================================================
-# Test cases
-# ============================================================
-TEST_CASES = [
-    (
-        "official_sample1",
-        """\
-3 A
-xoxox
-xxooo
-oxxxx
-""",
-    ),
-    (
-        "official_sample2",
-        """\
-5 C
-xoxoo
-oxxoo
-oxxxo
-xoxxx
-oxxoo
-""",
-    ),
-    (
-        "single_yes_A",
-        """\
-1 A
-oxxxx
-""",
-    ),
-    (
-        "single_no_A",
-        """\
-1 A
-xoooo
-""",
-    ),
-    (
-        "single_yes_E",
-        """\
-1 E
-xxxxo
-""",
-    ),
-    (
-        "first_yes_D",
-        """\
-3 D
-oxxox
-xoxxx
-ooxxx
-""",
-    ),
-    (
-        "first_yes_B",
-        """\
-4 B
-xoxxx
-xxxxx
-xxxxx
-xxxxx
-""",
-    ),
-    (
-        "last_yes_C",
-        """\
-4 C
-xxxxx
-oxxxx
-xxoxx
-xxxxx
-""",
-    ),
-    (
-        "many_yes_E",
-        """\
-5 E
-xxxxx
-xxxxo
-oxxxx
-xoxxx
-xxoxx
-""",
-    ),
-    (
-        "all_x_no_C",
-        """\
-5 C
-xxxxx
-xxxxx
-xxxxx
-xxxxx
-xxxxx
-""",
-    ),
-    (
-        "all_o_yes_D",
-        """\
-2 D
-ooooo
-xxxxx
-""",
-    ),
-]
+def send_eod(log=True):
+    return xfer("EOD", make_frame(CMD_EOD), log)
 
 
-# ============================================================
-# Main
-# ============================================================
-RUN_TESTS = True
+def send_debug(log=True):
+    return xfer("DEBUG", make_frame(CMD_DEBUG), log)
 
-INPUT_TEXT = """\
-3 A
-xoxox
-xxooo
-oxxxx
-"""
+
+def signed8(x):
+    x &= 0xFF
+    if x & 0x80:
+        return x - 0x100
+    return x
+
+
+def expected_diff(s):
+    diff = 0
+    for ch in s:
+        if ch == "E":
+            diff += 1
+        elif ch == "W":
+            diff -= 1
+        else:
+            raise ValueError("S must consist of only E and W")
+    return diff
+
+
+def expected_answer(s):
+    if expected_diff(s) > 0:
+        return "East"
+    return "West"
+
+
+def read_result(log=True):
+    rx = xfer("READ result", make_frame(CMD_NOP), log)
+    if rx == REPLY_EAST:
+        return "East"
+    if rx == REPLY_WEST:
+        return "West"
+    raise ValueError("unexpected result reply: " + hex8(rx))
+
+
+def read_debug_diff(log=True):
+    send_debug(log)
+    rx = xfer("READ debug", make_frame(CMD_NOP), log)
+    return signed8(rx)
+
+
+def solve_case(s, log=True):
+    send_reset(log)
+    clear = send_nop(log)
+
+    for ch in s:
+        send_data(ch, log)
+
+    send_eod(log)
+    actual = read_result(log)
+
+    send_reset(log)
+    end_clear = send_nop(log)
+
+    return actual, clear, end_clear
+
+
+def run_case(name, s, expected, debug_expected=None):
+    print()
+    print("========================================")
+    print("TEST:", name)
+    print("S =", s)
+    print("========================================")
+
+    send_reset()
+    clear = send_nop()
+    if clear != REPLY_WAIT:
+        print("WARN: post-reset NOP returned", hex8(clear))
+
+    for ch in s:
+        send_data(ch)
+
+    if debug_expected is not None:
+        actual_diff = read_debug_diff()
+        if actual_diff != debug_expected:
+            print("DEBUG FAIL: expected", debug_expected, "actual", actual_diff)
+            send_reset()
+            send_nop()
+            return False
+        print("DEBUG PASS: diff =", actual_diff)
+
+    send_eod()
+    actual = read_result()
+
+    send_reset()
+    clear = send_nop()
+    if clear != REPLY_WAIT:
+        print("WARN: end NOP returned", hex8(clear))
+
+    ok = actual == expected
+    print("expected =", expected, "actual =", actual, "=>", "PASS" if ok else "FAIL")
+    return ok
+
+
+def measure_case(name, s, expected, repeat=1):
+    ok_count = 0
+    total_us = 0
+    min_us = None
+    max_us = 0
+
+    for i in range(repeat):
+        start = time.ticks_us()
+        actual, clear, end_clear = solve_case(s, log=False)
+        elapsed = time.ticks_diff(time.ticks_us(), start)
+
+        total_us += elapsed
+        if min_us is None or elapsed < min_us:
+            min_us = elapsed
+        if elapsed > max_us:
+            max_us = elapsed
+
+        if actual == expected and clear == REPLY_WAIT and end_clear == REPLY_WAIT:
+            ok_count += 1
+
+    avg_us = total_us // repeat
+    print(
+        pad_right(name, 18)
+        + " len=" + str(len(s))
+        + " repeat=" + str(repeat)
+        + " ok=" + str(ok_count) + "/" + str(repeat)
+        + " avg_us=" + str(avg_us)
+        + " min_us=" + str(min_us)
+        + " max_us=" + str(max_us)
+    )
+
+
+def run_timing_tests():
+    print()
+    print("========================================")
+    print("TIMING TESTS")
+    print("========================================")
+
+    measure_case("timing_single_e", "E", "East", repeat=5)
+    measure_case("timing_official1", "EEWEW", "East", repeat=5)
+    measure_case("timing_w_99", "W" * 99, "West", repeat=5)
+    measure_case("timing_e50_w49", "E" * 50 + "W" * 49, "East", repeat=5)
+
+
+def run_tests():
+    cases = [
+        ("sample1_official", "EEWEW", "East", None),
+        ("sample2_official", "WWWWWWW", "West", None),
+        ("single_east", "E", "East", None),
+        ("single_west", "W", "West", None),
+        ("custom_east", "EEEWW", "East", None),
+        ("custom_west", "EEWWW", "West", None),
+        ("length99_east", "E" * 50 + "W" * 49, "East", None),
+        ("length99_west", "E" * 49 + "W" * 50, "West", None),
+        ("debug_plus_one", "EWE", "East", 1),
+        ("debug_minus_one", "WWE", "West", -1),
+    ]
+
+    ok_count = 0
+    for name, s, expected, debug_expected in cases:
+        if expected != expected_answer(s):
+            print("internal expected mismatch:", name)
+            continue
+        if run_case(name, s, expected, debug_expected):
+            ok_count += 1
+        time.sleep_ms(100)
+
+    print()
+    print("========================================")
+    print("SUMMARY:", ok_count, "/", len(cases), "passed")
+    print("========================================")
+
+    run_timing_tests()
 
 
 def main():
@@ -406,35 +303,7 @@ def main():
         print("Hardware reset")
         hw_reset()
 
-    if RUN_TESTS:
-        ok_count = 0
-
-        for name, text in TEST_CASES:
-            print()
-            print("========================================")
-            print("TEST:", name)
-            print("========================================")
-
-            expected = expected_answer(text)
-            actual = solve_with_fpga(text, log=True)
-
-            if actual == expected:
-                ok_count += 1
-                result = "PASS"
-            else:
-                result = "FAIL"
-
-            print("expected =", expected, "actual =", actual, "=>", result)
-            time.sleep_ms(100)
-
-        print()
-        print("========================================")
-        print("SUMMARY:", ok_count, "/", len(TEST_CASES), "passed")
-        print("========================================")
-
-    else:
-        ans = solve_with_fpga(INPUT_TEXT, log=True)
-        print(ans)
+    run_tests()
 
 
 main()

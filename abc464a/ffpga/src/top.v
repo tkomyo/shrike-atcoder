@@ -13,10 +13,10 @@
 
     assign clk_en = 1'b1;
 
-    // Wires for SPI Module
+    // Wires for SPI module
     wire [7:0] spi_rx_data;
     wire spi_rx_valid;
-    reg  [7:0] spi_tx_data;
+    wire [7:0] spi_tx_data;
     
     // Instantiate SPI Target
     spi_target #( .WIDTH(8) ) u_spi_target (
@@ -34,36 +34,32 @@
         .o_tx_data_hold()
     );
 
-    // Logic to handle SPI Commands
+    // Logic to handle SPI commands
     reg spi_rx_valid_d;
     
-    // Rx MISO cmd
     wire [2:0] mosi_cmd;
     assign mosi_cmd = spi_rx_data [7:5];
     
     localparam CMD_NOP   = 3'b000;
-    localparam CMD_SET_X = 3'b001;
-    localparam CMD_SET_S = 3'b010;
+    localparam CMD_DATA  = 3'b001;
+    localparam CMD_EOD   = 3'b010;
     localparam CMD_DEBUG = 3'b101;
     localparam CMD_RESET = 3'b111;
     
-    // Rx MISO data
-    wire [4:0] mosi_data;
-    assign mosi_data = spi_rx_data [4:0];
-    
-    // X data reg
-    reg [4:0] x_reg;
-    
-    // reply resuly reg
-    reg reply_result;
+    wire mosi_bit;
+    assign mosi_bit = spi_rx_data[0];
+
+    reg signed [7:0] diff;
+    reg [7:0] reply_reg;
+
+    assign spi_tx_data = reply_reg;
     
 	
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             spi_rx_valid_d <= 1'b0;
-            spi_tx_data	   <= 8'd0;
-            x_reg		   <= 5'b0;
-            reply_result   <= 1'b0;
+            reply_reg      <= 8'h00;
+            diff           <= 8'sd0;
             
         end else begin
             spi_rx_valid_d <= spi_rx_valid;            
@@ -73,34 +69,36 @@
                 
                 case (mosi_cmd)
                 	CMD_NOP: begin
-                		// No operation is implemented so far
+                		// Keep current reply_reg for readback.
                 	end
                 	
-                	CMD_SET_X: begin
-                		x_reg 	  <= mosi_data;
-                	end
-                	
-                	CMD_SET_S: begin
-                		if ((mosi_data & x_reg) != 5'd0) begin
-                			spi_tx_data  <= {1'b1, 6'd0, 1'b1};
-                			reply_result <= 1'b1;
+                	CMD_DATA: begin
+                		if (mosi_bit) begin
+                			diff <= diff + 8'sd1;
                 		end else begin
-                			spi_tx_data <= {1'b1, 6'd0, reply_result};
+                			diff <= diff - 8'sd1;
+                		end
+                	end
+                	
+                	CMD_EOD: begin
+                		if (diff > 8'sd0) begin
+                			reply_reg <= 8'h81;
+                		end else begin
+                			reply_reg <= 8'h80;
                 		end
                 	end
                 	
                 	CMD_DEBUG: begin
-                		// No operation is implemented so far
+                		reply_reg <= diff[7:0];
                 	end
                 	
                 	CMD_RESET: begin
-            			spi_tx_data	   <= 8'd0;
-            			x_reg		   <= 5'b0;
-            			reply_result   <= 1'b0;
+            			reply_reg   <= 8'h00;
+            			diff        <= 8'sd0;
                 	end
                 	
                 	default: begin
-                		// No operation for undefined command
+                		// No operation for undefined command.
                 	end
                 endcase
             end
